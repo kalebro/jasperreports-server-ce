@@ -136,6 +136,10 @@
       <groupId>com.jaspersoft.jasperserver</groupId>
       <artifactId>jasperserver-dto</artifactId>
     </dependency>
+      <dependency>
+          <groupId>javax.resource</groupId>
+          <artifactId>connector-api</artifactId>
+      </dependency>
   </dependencies>
 
     <build>

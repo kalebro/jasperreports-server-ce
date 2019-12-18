@@ -52,13 +52,24 @@ import com.jaspersoft.jasperserver.api.logging.audit.domain.AuditEvent;
 import com.jaspersoft.jasperserver.api.logging.context.LoggingContextProvider;
 import com.jaspersoft.jasperserver.api.metadata.common.domain.DataContainer;
 import com.jaspersoft.jasperserver.api.metadata.common.domain.DataContainerFactory;
+import com.jaspersoft.jasperserver.api.metadata.common.domain.Resource;
 import com.jaspersoft.jasperserver.api.metadata.common.domain.util.DataContainerStreamUtil;
 import com.jaspersoft.jasperserver.api.metadata.common.service.RepositoryService;
 import com.jaspersoft.jasperserver.api.metadata.common.util.LockManager;
 import com.jaspersoft.jasperserver.api.metadata.data.cache.DataCacheSnapshot;
+import com.jaspersoft.jasperserver.api.metadata.jasperreports.domain.JdbcReportDataSource;
+import com.jaspersoft.jasperserver.api.metadata.jasperreports.domain.ReportDataSource;
 import com.jaspersoft.jasperserver.api.metadata.jasperreports.domain.ReportUnit;
 import com.jaspersoft.jasperserver.api.metadata.user.domain.User;
 import com.jaspersoft.jasperserver.dto.common.ErrorDescriptor;
+import com.microsoft.azure.datalake.store.ADLStoreClient;
+import com.microsoft.azure.datalake.store.ADLStoreOptions;
+import com.microsoft.azure.datalake.store.IfExists;
+import com.microsoft.azure.datalake.store.SSLSocketFactoryEx;
+import com.microsoft.azure.datalake.store.oauth2.AccessTokenProvider;
+import com.microsoft.azure.datalake.store.oauth2.ClientCredsTokenProvider;
+import com.opencsv.CSVWriter;
+import net.sf.jasperreports.components.table.StandardTable;
 import net.sf.jasperreports.engine.JRParameter;
 import net.sf.jasperreports.engine.JRPrintPage;
 import net.sf.jasperreports.engine.JRPropertiesUtil;
@@ -67,9 +78,14 @@ import net.sf.jasperreports.engine.JasperReport;
 import net.sf.jasperreports.engine.JasperReportsContext;
 import net.sf.jasperreports.engine.ReportContext;
 import net.sf.jasperreports.engine.SimpleReportContext;
+import net.sf.jasperreports.engine.base.JRBaseComponentElement;
 import net.sf.jasperreports.engine.export.JRHyperlinkProducerFactory;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
+import org.apache.http.client.methods.CloseableHttpResponse;
+import org.apache.http.client.methods.HttpGet;
+import org.apache.http.impl.client.CloseableHttpClient;
+import org.apache.http.impl.client.HttpClientBuilder;
 import org.quartz.Job;
 import org.quartz.JobDataMap;
 import org.quartz.JobExecutionContext;
@@ -78,10 +94,22 @@ import org.quartz.SchedulerContext;
 import org.quartz.SchedulerException;
 import org.springframework.context.ApplicationContext;
 import org.springframework.context.i18n.LocaleContextHolder;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.mail.javamail.JavaMailSender;
+import org.springframework.util.CollectionUtils;
+import org.springframework.util.StringUtils;
 
-import java.io.PrintWriter;
 import java.io.StringWriter;
+import java.io.OutputStream;
+import java.io.BufferedWriter;
+import java.io.Writer;
+import java.io.IOException;
+import java.io.OutputStreamWriter;
+import java.io.PrintWriter;
+import java.net.URLEncoder;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -94,9 +122,13 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Map.Entry;
-import java.util.Set;
+import java.util.Calendar;
 import java.util.TimeZone;
+import java.util.Set;
+import java.util.Arrays;
 import java.util.WeakHashMap;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
 /**
  * @author Lucian Chirita (lucianc@users.sourceforge.net)
@@ -144,6 +176,14 @@ public class ReportExecutionJob implements Job {
     public static final String SCHEDULER_CONTEXT_KEY_DISABLE_SENDING_ALERT_TO_ADMIN = "disableSendingAlertToAdmin";
     public static final String SCHEDULER_CONTEXT_KEY_DISABLE_SENDING_ALERT_TO_OWNER = "disableSendingAlertToOwner";
 
+    public static final String SCHEDULER_CONTEXT_KEY_ADL_ACCOUNT_FQDN = "adlAccountFQDN";
+    public static final String SCHEDULER_CONTEXT_KEY_ADL_CLIENT_ID = "adlClientId";
+    public static final String SCHEDULER_CONTEXT_KEY_ADL_CLIENT_KEY = "adlClientKey";
+    public static final String SCHEDULER_CONTEXT_KEY_ADL_AUTH_TOKEN_ENDPOINT = "adlAuthTokenEndpoint";
+    public static final String SCHEDULER_CONTEXT_KEY_ADL_BASE_DIR = "adlBaseDir";
+    public static final String SCHEDULER_CONTEXT_KEY_JASPERREPORT_OUT_BASE_DIR = "jasperOutBaseDir";
+    public static final String SCHEDULER_CONTEXT_KEY_LOGIC_APP_COPY_SHAREPOINT = "logicAppADLtoSharepoint";
+
     public static final String JOB_DATA_KEY_DETAILS_ID = "jobDetailsID";
     public static final String JOB_DATA_KEY_USERNAME = "jobUser";
 
@@ -179,6 +219,7 @@ public class ReportExecutionJob implements Job {
     public static void setAuditContext(AuditContext auditContext) {
         ReportExecutionJob.auditContext = auditContext;
     }
+
 
     public static void setLoggingContextProvider(LoggingContextProvider loggingContextProvider) {
         ReportExecutionJob.loggingContextProvider = loggingContextProvider;
@@ -495,92 +536,150 @@ public class ReportExecutionJob implements Job {
                     jobDetails = getReportExecutionJobInit().initJob(this, jobDetails);
 
                 JasperReport jasperReport = getEngineService().getMainJasperReport(executionContext, getReportUnitURI());
-                List<Output> outputs = createOutputs();
-                executeReport(outputs, jasperReport);
 
-                if (hasReportResult()) {
-                    isCancelRequested();
-                    ReportJobMailNotification mailNotification = jobDetails.getMailNotification();
-                    boolean skipEmpty = false;
-                    if (mailNotification != null) {
-                        skipEmpty = mailNotification.isSkipEmptyReports() && isEmptyReportResult();
+                final String accountFQDN = getAdlAccountFQDN();
+                final String clientId = getAdlClientId();
+                final String authTokenEndpoint = getAdlAuthTokenEndpoint();
+                final String clientKey = getAdlClientKey();
+                final String logicAppADLtoSharepointURL = getLogicAppCopySharepoint();
+                String adlBaseDir = getAdlBaseDir();
+                String jasperreportOutBaseDir = getJasperreportOutBaseDir();
+                if (jobDetails.getOutputFormatsSet().size() == 1
+                        && !StringUtils.isEmpty(accountFQDN)
+                        && !StringUtils.isEmpty(clientId)
+                        && !StringUtils.isEmpty(clientKey)
+                        && !StringUtils.isEmpty(authTokenEndpoint)
+                        && !StringUtils.isEmpty(logicAppADLtoSharepointURL)) {
+
+                    if (StringUtils.isEmpty(adlBaseDir)) {
+                        adlBaseDir = "";
                     }
-                    List<ReportOutput> reportOutputs = new ArrayList<ReportOutput>();
 
-                    if (!skipEmpty) {
-                        String baseFileName = getBaseFileName();
-                        boolean useFolderHierarchy = true;
+                    if (StringUtils.isEmpty(jasperreportOutBaseDir)) {
+                        jasperreportOutBaseDir = "";
+                    }
+                    log.info("");
+                    log.info("");
+                    log.info("");
+                    log.info("===============================================================================");
+                    jobDetails.getOutputFormatsSet().stream().forEach(s -> log.info("Output format: " + s));
+                    String baseOutputFileName = jobDetails.getBaseOutputFilename();
+                    log.info("Base output filename : " + baseOutputFileName);
 
-                        if ((mailNotification != null) &&
-                                ((mailNotification.getResultSendTypeCode() == ReportJobMailNotification.RESULT_SEND_ATTACHMENT_NOZIP) ||
-                                        (mailNotification.getResultSendTypeCode() == ReportJobMailNotification.RESULT_SEND_EMBED))) {
-                            useFolderHierarchy = false;
+                    StringBuilder folder = getSubfolder(jasperreportOutBaseDir);
+
+                    String query = jasperReport.getDatasets()[0].getQuery().getText();
+                    log.info("SQL Query: " + query);
+                    log.info("Output folder : " + folder);
+
+                    ExecutionContext runtimeContext = ((EngineServiceImpl) getEngineService()).getRuntimeExecutionContext(executionContext);
+                    ReportDataSource dataSource = (ReportDataSource) ((EngineServiceImpl) getEngineService()).getFinalResource(runtimeContext, reportUnit.getDataSource(), Resource.class);
+                    if (dataSource != null) {
+                        final Map<String, String> params = getParametersQueryAndMapOnBaseParameters(jasperReport);
+
+                        query = getFormatSQLQuery(query, params);
+
+                        /**
+                         * create Datasourse and put in map
+                         */
+                        DriverManagerDataSource dataSourceJDBC = initDataSource((JdbcReportDataSource) dataSource);
+
+                        executeReport(accountFQDN, clientId, authTokenEndpoint, clientKey, logicAppADLtoSharepointURL, adlBaseDir, baseOutputFileName, folder, query, dataSourceJDBC);
+
+                    }
+                    log.info("===============================================================================");
+                    log.info("");
+                    log.info("");
+                    log.info("");
+                }
+                else  {
+                    List<Output> outputs = createOutputs();
+                    executeReport(outputs, jasperReport);
+
+                    if (hasReportResult()) {
+                        isCancelRequested();
+                        ReportJobMailNotification mailNotification = jobDetails.getMailNotification();
+                        boolean skipEmpty = false;
+                        if (mailNotification != null) {
+                            skipEmpty = mailNotification.isSkipEmptyReports() && isEmptyReportResult();
                         }
+                        List<ReportOutput> reportOutputs = new ArrayList<ReportOutput>();
 
-                        ReportJobContext reportJobContext = getReportJobContext(baseFileName, useFolderHierarchy);
-                        
-                        for (Output output : outputs) {
-                            ReportOutput reportOutput = null;
-                            ReportUnitResult resultToExport = getReportResultForOutput(output, jasperReport);
+                        if (!skipEmpty) {
+                            String baseFileName = getBaseFileName();
+                            boolean useFolderHierarchy = true;
 
-                            if (resultToExport != null) {
-                                // enforce to use grid-base HTML exporter for embedded report in email
-                                // DIV doesn't work well in email
-                                if ((mailNotification != null) && (mailNotification.getResultSendType() == ReportJobMailNotification.RESULT_SEND_EMBED) &&
-                                        (output instanceof HtmlReportOutput)) {
-                                    ((HtmlReportOutput) output).setForceToUseHTMLExporter(true);
-                                }
-                                isCancelRequested();
-                                try {
-                                    reportOutput = output.getOutput(
-                                    		reportJobContext,
-                                            resultToExport.getJasperPrint()
-                                    );
-                                } catch (Exception e) {
-                                    String fileExtension = null;
-                                    final Map outputFormatMap = getOutputFormatMap();
-                                    for (Object currentExtension : outputFormatMap.keySet()) {
-                                        if (outputFormatMap.get(currentExtension) == output) {
-                                            fileExtension = currentExtension.toString();
-                                            break;
-                                        }
-                                    }
-                                    // log the error and continue with outputs generation
-                                    handleException(getMessage("report.scheduling.error.exporting.report", new Object[]{fileExtension}), e);
-                                    continue;
-                                }
-                                isCancelRequested();
-                                if (reportOutput != null) reportOutputs.add(reportOutput);
-
+                            if ((mailNotification != null) &&
+                                    ((mailNotification.getResultSendTypeCode() == ReportJobMailNotification.RESULT_SEND_ATTACHMENT_NOZIP) ||
+                                            (mailNotification.getResultSendTypeCode() == ReportJobMailNotification.RESULT_SEND_EMBED))) {
+                                useFolderHierarchy = false;
                             }
 
-                            isCancelRequested();
+                            ReportJobContext reportJobContext = getReportJobContext(baseFileName, useFolderHierarchy);
 
+                            for (Output output : outputs) {
+                                ReportOutput reportOutput = null;
+                                ReportUnitResult resultToExport = getReportResultForOutput(output, jasperReport);
 
-                            if ((!useFolderHierarchy) && (jobDetails.getContentRepositoryDestination() != null) &&
-                                    (jobDetails.getContentRepositoryDestination().isSaveToRepository()) && (!reportOutput.getChildren().isEmpty())) {
-                                // if not using hierarchy, but contains children and requires to save to repository.  regenerate the output with folder hierarchy
-                                ReportJobContext reportRepositoryJobContext = getReportJobContext(baseFileName, true);
-                                ReportOutput reportOutputForRepository = output.getOutput(
-                                		reportRepositoryJobContext,
-                                        resultToExport.getJasperPrint());
+                                if (resultToExport != null) {
+                                    // enforce to use grid-base HTML exporter for embedded report in email
+                                    // DIV doesn't work well in email
+                                    if ((mailNotification != null) && (mailNotification.getResultSendType() == ReportJobMailNotification.RESULT_SEND_EMBED) &&
+                                            (output instanceof HtmlReportOutput)) {
+                                        ((HtmlReportOutput) output).setForceToUseHTMLExporter(true);
+                                    }
+                                    isCancelRequested();
+                                    try {
+                                        reportOutput = output.getOutput(
+                                                reportJobContext,
+                                                resultToExport.getJasperPrint()
+                                        );
+                                    } catch (Exception e) {
+                                        String fileExtension = null;
+                                        final Map outputFormatMap = getOutputFormatMap();
+                                        for (Object currentExtension : outputFormatMap.keySet()) {
+                                            if (outputFormatMap.get(currentExtension) == output) {
+                                                fileExtension = currentExtension.toString();
+                                                break;
+                                            }
+                                        }
+                                        // log the error and continue with outputs generation
+                                        handleException(getMessage("report.scheduling.error.exporting.report", new Object[]{fileExtension}), e);
+                                        continue;
+                                    }
+                                    isCancelRequested();
+                                    if (reportOutput != null) reportOutputs.add(reportOutput);
+
+                                }
+
                                 isCancelRequested();
-                                if (reportOutputForRepository != null)
-                                    getReportExecutionJobFileSaving().save(this, reportOutputForRepository, true, jobDetails);
-                            } else
-                                getReportExecutionJobFileSaving().save(this, reportOutput, useFolderHierarchy, jobDetails);
-                        }
-                    }
 
-                    if (mailNotification != null) {
-                        if (!skipEmpty || hasExceptions()) {
-                            List attachments = skipEmpty ? null : reportOutputs;
-                            isCancelRequested();
-                            try {
-                                isMailNotificationSent = true;
-                                sendMailNotification(attachments);
-                            } catch (Exception e) {
-                                handleException(getMessage("report.scheduling.error.sending.email.notification", null), e);
+
+                                if ((!useFolderHierarchy) && (jobDetails.getContentRepositoryDestination() != null) &&
+                                        (jobDetails.getContentRepositoryDestination().isSaveToRepository()) && (!reportOutput.getChildren().isEmpty())) {
+                                    // if not using hierarchy, but contains children and requires to save to repository.  regenerate the output with folder hierarchy
+                                    ReportJobContext reportRepositoryJobContext = getReportJobContext(baseFileName, true);
+                                    ReportOutput reportOutputForRepository = output.getOutput(
+                                            reportRepositoryJobContext,
+                                            resultToExport.getJasperPrint());
+                                    isCancelRequested();
+                                    if (reportOutputForRepository != null)
+                                        getReportExecutionJobFileSaving().save(this, reportOutputForRepository, true, jobDetails);
+                                } else
+                                    getReportExecutionJobFileSaving().save(this, reportOutput, useFolderHierarchy, jobDetails);
+                            }
+                        }
+
+                        if (mailNotification != null) {
+                            if (!skipEmpty || hasExceptions()) {
+                                List attachments = skipEmpty ? null : reportOutputs;
+                                isCancelRequested();
+                                try {
+                                    isMailNotificationSent = true;
+                                    sendMailNotification(attachments);
+                                } catch (Exception e) {
+                                    handleException(getMessage("report.scheduling.error.sending.email.notification", null), e);
+                                }
                             }
                         }
                     }
@@ -614,7 +713,175 @@ public class ReportExecutionJob implements Job {
             checkExceptions();
         }
     }
-    
+
+    private Map<String, String> getParametersQueryAndMapOnBaseParameters(JasperReport jasperReport) {
+        final Map<String, String> params = new HashMap<>();
+        if (jasperReport.getSummary() == null) {
+            return params;
+        }
+        if (CollectionUtils.isEmpty(jasperReport.getSummary().getChildren())) {
+            return params;
+        }
+        try {
+            Arrays.stream(((StandardTable) ((JRBaseComponentElement) jasperReport.getSummary().getChildren().get(0)).getComponent()).getDatasetRun().getParameters()).forEach(param -> {
+                params.put(param.getName(), param.getExpression().getText().replace("$P{", "").replace("}", ""));
+                log.info("Param name: " + param.getName() + " -> " + params.get(param.getName()));
+            });
+        } catch (Exception ex) {
+          handleException("error.generating.report", ex);
+        }
+        return params;
+    }
+
+    private DriverManagerDataSource initDataSource(JdbcReportDataSource dataSource) {
+        DriverManagerDataSource dataSourceJDBC = new DriverManagerDataSource();
+        dataSourceJDBC.setDriverClassName(dataSource.getDriverClass());
+        dataSourceJDBC.setUsername(dataSource.getUsername());
+        dataSourceJDBC.setPassword(dataSource.getPassword());
+        dataSourceJDBC.setUrl(dataSource.getConnectionUrl());
+        return dataSourceJDBC;
+    }
+
+    private String getFormatSQLQuery(String query, Map<String, String> params) {
+        for (String key : params.keySet()) {
+            Object globalParamValue = jobDetails.getSource().getParameters().get(params.get(key));
+            if (globalParamValue != null) {
+                if (globalParamValue instanceof Date) {
+                    globalParamValue = "'" + new SimpleDateFormat("yyyy-MM-dd").format((Date) globalParamValue) + "'";
+                } else if (globalParamValue instanceof  String){
+                    globalParamValue = "'" + globalParamValue.toString() + "'";
+                } else {
+                    globalParamValue = String.valueOf(globalParamValue);
+                }
+                query = query.replace("$P{" + key + "}",  globalParamValue.toString());
+            } else {
+                query = query.replace("$P{" + key + "}",  "NULL");
+            }
+        }
+        log.info("SQL Query: " + query);
+        return query;
+    }
+
+    private void executeReport(String accountFQDN, String clientId, String authTokenEndpoint, String clientKey, String logicAppADLtoSharepointURL, String adlBaseDir, String baseOutputFileName, StringBuilder folder, String query, DriverManagerDataSource dataSourceJDBC) throws IOException {
+        log.info("Start execute report ");
+        long start = System.currentTimeMillis();
+        try {
+            AccessTokenProvider provider = new ClientCredsTokenProvider(authTokenEndpoint, clientId, clientKey);
+            ADLStoreClient client = ADLStoreClient.createClient(accountFQDN, provider);
+            ADLStoreOptions options = new ADLStoreOptions();
+            options.setSSLChannelMode(SSLSocketFactoryEx.SSLChannelMode.Default_JSE.name());
+            try {
+                client.setOptions(options);
+            } catch (IOException e) {
+                log.info("Error set ssl channel mode Default_JSE");
+            }
+
+
+            OutputStream outputStream = client.createFile(adlBaseDir + "/"+ folder.toString() + "/" + baseOutputFileName +".zip", IfExists.OVERWRITE);
+            ZipOutputStream zipOutputStream = new ZipOutputStream(outputStream);
+            ZipEntry zipEntry = new ZipEntry(baseOutputFileName + ".csv");
+            zipOutputStream.putNextEntry(zipEntry);
+
+            Statement statement = dataSourceJDBC
+                    .getConnection()
+                    .createStatement(ResultSet.TYPE_SCROLL_SENSITIVE, ResultSet.CONCUR_UPDATABLE);
+            Writer writer = new BufferedWriter(new OutputStreamWriter(zipOutputStream));
+            CSVWriter csvWriter = new CSVWriter(writer, CSVWriter.DEFAULT_SEPARATOR, CSVWriter.NO_QUOTE_CHARACTER, CSVWriter.NO_ESCAPE_CHARACTER, CSVWriter.DEFAULT_LINE_END);
+            csvWriter.writeAll(statement.executeQuery(query), true);
+            csvWriter.close();
+            writer.close();
+            zipOutputStream.close();
+            outputStream.close();
+
+            copyFromADLtoSharePoint(logicAppADLtoSharepointURL, baseOutputFileName, folder);
+
+        } catch (SQLException ex) {
+            handleException(getMessage("error.generating.report", null), ex);
+        } catch (Exception ex) {
+            handleException(getMessage("error.generating.report", null), ex);
+        }
+        log.info("Finish execute report: " + (System.currentTimeMillis() - start));
+    }
+
+    private StringBuilder getSubfolder(String jasperreportOutBaseDir) {
+        String initFolderValue = jobDetails.getContentRepositoryDestination().getFolderURI();
+        if (!StringUtils.isEmpty(jasperreportOutBaseDir) && initFolderValue.startsWith(jasperreportOutBaseDir)) {
+            initFolderValue = initFolderValue.replaceFirst(jasperreportOutBaseDir,"");
+        }
+        StringBuilder folder = new StringBuilder(initFolderValue);
+
+        Calendar calendar = Calendar.getInstance(TimeZone.getTimeZone(jobDetails.getOutputTimeZone()));
+        log.info("Report Time: " + calendar.getTime().toString());
+        if (folder.toString().contains(" FM ")) {
+            //Fiscal month
+            folder.append("/")
+                    .append(calendar.get(Calendar.YEAR))
+                    .append("/")
+                    .append(calendar.get(Calendar.MONTH) + 1);
+        } else if (folder.toString().contains("Month")) {
+            //Average month
+            calendar.add(Calendar.MONTH, -1);
+            folder.append("/")
+                    .append(calendar.get(Calendar.YEAR))
+                    .append("/")
+                    .append(calendar.get(Calendar.MONTH) + 1);
+        } else if (folder.toString().contains("Weekly")) {
+            //weekly report
+            calendar.add(Calendar.WEEK_OF_YEAR, -1);
+            folder.append("/")
+                    .append(calendar.get(Calendar.YEAR))
+                    .append("/")
+                    .append(calendar.get(Calendar.MONTH) + 1).append("/").append(calendar.get(Calendar.WEEK_OF_YEAR));
+        } else if (folder.toString().contains("Daily")) {
+            //daily
+            calendar.add(Calendar.DAY_OF_YEAR, -1);
+            folder.append("/")
+                    .append(calendar.get(Calendar.YEAR))
+                    .append("/")
+                    .append(calendar.get(Calendar.MONTH) + 1).append("/").append(calendar.get(Calendar.DAY_OF_MONTH));
+
+        }
+        return folder;
+    }
+
+    private void copyFromADLtoSharePoint(String logicAppADLtoSharepointURL, String fileName, StringBuilder subfolder) {
+        if (StringUtils.isEmpty(logicAppADLtoSharepointURL)) {
+            log.info("Logic app url is empty");
+            return;
+        }
+        if (StringUtils.isEmpty(fileName)) {
+            log.info("FileName is empty");
+            return;
+        }
+        if (StringUtils.isEmpty(subfolder)) {
+            log.info("Subfolder is empty");
+            return;
+        }
+        log.info("Start Copy from Azure Data Lake Gen 1 to Sharepoint");
+        log.info("Copy " + subfolder.toString() + "/" + fileName + ".zip to Sharepoint");
+        HttpClientBuilder clientBuilder = HttpClientBuilder.create();
+
+        StringBuilder url = new StringBuilder(logicAppADLtoSharepointURL);
+        url.append("&path=")
+                .append(URLEncoder.encode(subfolder.toString()))
+                .append("&filename=")
+                .append(URLEncoder.encode(fileName + ".zip"));
+        try (CloseableHttpClient httpClient = clientBuilder.build()) {
+            HttpGet httpGet = new HttpGet(url.toString());
+            try (CloseableHttpResponse response = httpClient.execute(httpGet)) {
+                if (response.getStatusLine().getStatusCode() == 200) {
+                    log.info("Files copy to Sharepoint : OK");
+                } else {
+                    log.info("Files copy to Sharepoint : Failed");
+                    log.info(response.getStatusLine().getReasonPhrase());
+                }
+            }
+        } catch (Exception e) {
+            handleException("error.generating.report", e);
+        }
+        log.info("Finish Copy from Azure Data Lake Gen 1 to Sharepoint");
+    }
+
     protected ReportJobContext getReportJobContext(final String baseFilename, final boolean useRepository) {
     	return new ReportJobContext() {
 			@Override
@@ -1244,6 +1511,41 @@ public class ReportExecutionJob implements Job {
         String value = (String) schedulerContext.get(SCHEDULER_CONTEXT_KEY_DISABLE_SENDING_ALERT_TO_OWNER);
         if (value == null) return false;
         return value.equalsIgnoreCase("true");
+    }
+
+    protected String getAdlAccountFQDN() {
+        String value = (String) schedulerContext.get(SCHEDULER_CONTEXT_KEY_ADL_ACCOUNT_FQDN);
+        return  value;
+    }
+
+    protected String getAdlClientId() {
+        String value = (String) schedulerContext.get(SCHEDULER_CONTEXT_KEY_ADL_CLIENT_ID);
+        return  value;
+    }
+
+    protected String getAdlClientKey() {
+        String value = (String) schedulerContext.get(SCHEDULER_CONTEXT_KEY_ADL_CLIENT_KEY);
+        return  value;
+    }
+
+    protected String getAdlAuthTokenEndpoint() {
+        String value = (String) schedulerContext.get(SCHEDULER_CONTEXT_KEY_ADL_AUTH_TOKEN_ENDPOINT);
+        return  value;
+    }
+
+    protected String getLogicAppCopySharepoint() {
+        String value = (String) schedulerContext.get(SCHEDULER_CONTEXT_KEY_LOGIC_APP_COPY_SHAREPOINT);
+        return  value;
+    }
+
+    protected String getAdlBaseDir() {
+        String value = (String) schedulerContext.get(SCHEDULER_CONTEXT_KEY_ADL_BASE_DIR);
+        return  value;
+    }
+
+    protected String getJasperreportOutBaseDir() {
+        String value = (String) schedulerContext.get(SCHEDULER_CONTEXT_KEY_JASPERREPORT_OUT_BASE_DIR);
+        return  value;
     }
 
     protected Map getOutputFormatMap() {

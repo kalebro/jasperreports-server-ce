@@ -31,7 +31,6 @@
     <url>http://www.jaspersoft.com</url>
 
 
-
   <profiles>
     <profile>
       <id>additional-tests</id>
@@ -737,7 +736,7 @@
       <dependency>
         <groupId>jaxen</groupId>
         <artifactId>jaxen</artifactId>
-        <version>1.1-beta-8-JS-1</version>
+        <version>1.2.0</version>
         <exclusions>
           <exclusion>
             <groupId>pull-parser</groupId>
@@ -1154,6 +1153,7 @@
   </distributionManagement>
 
   <properties>
+    <buildArtifactVersionName>7.2.0</buildArtifactVersionName>
     <jpivot-groupId>jaspersoft.ji-pro.ji-jpivot-ui</jpivot-groupId>
     <connector-version>${project.version}</connector-version>
     <jpivot-artifactId>ji-jpivot</jpivot-artifactId>

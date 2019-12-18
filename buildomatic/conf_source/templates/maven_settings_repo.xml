@@ -20,7 +20,7 @@
   -->
 
 <settings>
-  <offline>${maven.offline}</offline>
+  <offline>false</offline>
   <localRepository>${maven-localrepo-path}</localRepository>  
   <profiles>
     <profile>
@@ -53,7 +53,7 @@
         <repository>
           <id>js-repo-svn</id>
           <name>Repository for JasperReports Server dependencies</name>
-          <url>file://${repo-path}</url>
+          <url>file://C:/Users/vsuprunovich/.m2/repository</url>
           <snapshots>
             <enabled>true</enabled>
             <updatePolicy>always</updatePolicy>

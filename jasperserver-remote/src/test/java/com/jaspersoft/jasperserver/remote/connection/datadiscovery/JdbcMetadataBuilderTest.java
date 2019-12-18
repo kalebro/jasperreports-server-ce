@@ -21,10 +21,8 @@
 package com.jaspersoft.jasperserver.remote.connection.datadiscovery;
 
 import com.jaspersoft.jasperserver.dto.resources.DataSourceTableDescriptor;
-import com.sun.rowset.CachedRowSetImpl;
-import org.eigenbase.resgen.ResourceDef;
+
 import org.springframework.jdbc.InvalidResultSetAccessException;
-import org.springframework.jdbc.support.rowset.ResultSetWrappingSqlRowSet;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 

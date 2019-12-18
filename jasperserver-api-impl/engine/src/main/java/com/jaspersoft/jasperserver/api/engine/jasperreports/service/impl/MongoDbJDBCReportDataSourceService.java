@@ -20,9 +20,6 @@
  */
 package com.jaspersoft.jasperserver.api.engine.jasperreports.service.impl;
 
-import com.jaspersoft.jasperserver.api.engine.common.virtualdatasourcequery.VirtualSQLDataSource;
-import mondrian.olap.MondrianDef;
-import org.springframework.security.access.method.P;
 
 import javax.sql.DataSource;
 import java.sql.Connection;

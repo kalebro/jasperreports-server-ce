@@ -512,6 +512,13 @@
             <version>3.0.1</version>
             <scope>provided</scope>
         </dependency>
+<!--        <dependency>-->
+<!--            <groupId>json</groupId>-->
+<!--            <artifactId>json-org</artifactId>-->
+<!--            <version>1.0</version>-->
+<!--            &lt;!&ndash; org.JSON from hive dependency weill be used in runtime because of bug: #28526 &ndash;&gt;-->
+<!--            <scope>provided</scope>-->
+<!--        </dependency>-->
         <dependency>
             <groupId>json</groupId>
             <artifactId>json-org</artifactId>
@@ -527,7 +534,7 @@
         <dependency>
             <groupId>jaxen</groupId>
             <artifactId>jaxen</artifactId>
-            <version>1.1-beta-8-JS-1</version>
+            <version>1.2.0</version>
         </dependency>
         <dependency>
             <groupId>commons-fileupload</groupId>
