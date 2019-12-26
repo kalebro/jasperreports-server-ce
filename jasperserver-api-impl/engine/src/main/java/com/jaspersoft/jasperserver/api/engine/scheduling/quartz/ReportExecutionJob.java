@@ -69,6 +69,7 @@ import com.microsoft.azure.datalake.store.SSLSocketFactoryEx;
 import com.microsoft.azure.datalake.store.oauth2.AccessTokenProvider;
 import com.microsoft.azure.datalake.store.oauth2.ClientCredsTokenProvider;
 import com.opencsv.CSVWriter;
+import net.sf.jasperreports.components.table.StandardColumn;
 import net.sf.jasperreports.components.table.StandardTable;
 import net.sf.jasperreports.engine.JRParameter;
 import net.sf.jasperreports.engine.JRPrintPage;
@@ -79,6 +80,8 @@ import net.sf.jasperreports.engine.JasperReportsContext;
 import net.sf.jasperreports.engine.ReportContext;
 import net.sf.jasperreports.engine.SimpleReportContext;
 import net.sf.jasperreports.engine.base.JRBaseComponentElement;
+import net.sf.jasperreports.engine.base.JRBaseStaticText;
+import net.sf.jasperreports.engine.base.JRBaseTextField;
 import net.sf.jasperreports.engine.export.JRHyperlinkProducerFactory;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -544,8 +547,7 @@ public class ReportExecutionJob implements Job {
                 final String logicAppADLtoSharepointURL = getLogicAppCopySharepoint();
                 String adlBaseDir = getAdlBaseDir();
                 String jasperreportOutBaseDir = getJasperreportOutBaseDir();
-                if (jobDetails.getOutputFormatsSet().size() == 1
-                        && !StringUtils.isEmpty(accountFQDN)
+                if (!StringUtils.isEmpty(accountFQDN)
                         && !StringUtils.isEmpty(clientId)
                         && !StringUtils.isEmpty(clientKey)
                         && !StringUtils.isEmpty(authTokenEndpoint)
@@ -562,11 +564,23 @@ public class ReportExecutionJob implements Job {
                     log.info("");
                     log.info("");
                     log.info("===============================================================================");
+                    final Map<String, String> params = getParametersQueryAndMapOnBaseParameters(jasperReport);
                     jobDetails.getOutputFormatsSet().stream().forEach(s -> log.info("Output format: " + s));
-                    String baseOutputFileName = jobDetails.getBaseOutputFilename();
+                    StringBuilder baseOutputFileName = new StringBuilder(jobDetails.getBaseOutputFilename());
                     log.info("Base output filename : " + baseOutputFileName);
 
-                    StringBuilder folder = getSubfolder(jasperreportOutBaseDir);
+                    Calendar calendar = Calendar.getInstance(TimeZone.getTimeZone(jobDetails.getTrigger().getTimezone()));
+                    if (params.containsKey("ReportDateTable")) {
+                        Date reportDate = (Date) jobDetails.getSource().getParameters().get(params.get("ReportDateTable"));
+                        if (reportDate != null) {
+                            calendar.setTime(reportDate);
+                        }
+                    }
+                    log.info("Timezone: " + jobDetails.getTrigger().getTimezone());
+                    log.info("Report Time: " + calendar.getTime().toString());
+                    StringBuilder folder = getSubfolder(jasperreportOutBaseDir, calendar);
+
+                    getBaseFileNameCustom(folder, baseOutputFileName, calendar);
 
                     String query = jasperReport.getDatasets()[0].getQuery().getText();
                     log.info("SQL Query: " + query);
@@ -575,16 +589,16 @@ public class ReportExecutionJob implements Job {
                     ExecutionContext runtimeContext = ((EngineServiceImpl) getEngineService()).getRuntimeExecutionContext(executionContext);
                     ReportDataSource dataSource = (ReportDataSource) ((EngineServiceImpl) getEngineService()).getFinalResource(runtimeContext, reportUnit.getDataSource(), Resource.class);
                     if (dataSource != null) {
-                        final Map<String, String> params = getParametersQueryAndMapOnBaseParameters(jasperReport);
 
                         query = getFormatSQLQuery(query, params);
-
+                        LinkedHashMap<String, String> mapHeadersAndFields = getStringStringLinkedHashMap(jasperReport);
                         /**
                          * create Datasourse and put in map
                          */
                         DriverManagerDataSource dataSourceJDBC = initDataSource((JdbcReportDataSource) dataSource);
 
-                        executeReport(accountFQDN, clientId, authTokenEndpoint, clientKey, logicAppADLtoSharepointURL, adlBaseDir, baseOutputFileName, folder, query, dataSourceJDBC);
+                        executeReport(accountFQDN, clientId, authTokenEndpoint, clientKey, logicAppADLtoSharepointURL,
+                                adlBaseDir, baseOutputFileName.toString(), folder, query, dataSourceJDBC, mapHeadersAndFields);
 
                     }
                     log.info("===============================================================================");
@@ -714,6 +728,50 @@ public class ReportExecutionJob implements Job {
         }
     }
 
+    private LinkedHashMap<String, String> getStringStringLinkedHashMap(JasperReport jasperReport) {
+        final LinkedHashMap<String, String> mapHeadersAndFields = new LinkedHashMap<>();
+
+        try {
+            ((StandardTable) ((JRBaseComponentElement) jasperReport.getSummary().getChildren().get(0)).getComponent())
+                    .getColumns().stream().forEach(column -> {
+                String header = ((JRBaseStaticText)column.getColumnHeader().getChildren().get(0)).getText();
+                String field = ((JRBaseTextField)((StandardColumn)column).getDetailCell().getChildren().get(0)).getExpression().getChunks()[0].getText();
+                log.info("field: " + field + " -> header: " + header);
+                mapHeadersAndFields.put(field, header);
+            });
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+
+
+        return mapHeadersAndFields;
+    }
+
+    private void getBaseFileNameCustom(StringBuilder folder, StringBuilder baseOutputFileName, Calendar calendar) {
+        if (folder.toString().contains("_FM_")) {
+            //Fiscal month
+            baseOutputFileName.append("_").append(calendar.get(Calendar.YEAR)).append("FM").append(calendar.get(Calendar.MONTH) + 1);
+        } else if (folder.toString().contains("Monthly")) {
+            //Average month
+            //baseOutputFileName.append("_").append(calendar.get(Calendar.YEAR)).append("Monthly").append(calendar.get(Calendar.MONTH) + 1);
+        } else if (folder.toString().contains("Weekly")) {
+            //weekly report
+            baseOutputFileName.append("_").append(calendar.get(Calendar.YEAR)).append("W").append(calendar.get(Calendar.WEEK_OF_YEAR));
+        } else if (folder.toString().contains("Daily")) {
+            //daily
+            //baseOutputFileName.append("_").append(calendar.get(Calendar.YEAR)).append("Daily").append(calendar.get(Calendar.MONTH) + 1).append("-").append(calendar.get(Calendar.DAY_OF_MONTH));
+        }
+
+        baseOutputFileName
+                .append("_")
+                .append(calendar.get(Calendar.YEAR))
+                .append("-")
+                .append(calendar.get(Calendar.MONTH) + 1)
+                .append("-")
+                .append(calendar.get(Calendar.DAY_OF_MONTH));
+        log.info("Formatting baseFilename: " + baseOutputFileName.toString());
+    }
+
     private Map<String, String> getParametersQueryAndMapOnBaseParameters(JasperReport jasperReport) {
         final Map<String, String> params = new HashMap<>();
         if (jasperReport.getSummary() == null) {
@@ -762,7 +820,11 @@ public class ReportExecutionJob implements Job {
         return query;
     }
 
-    private void executeReport(String accountFQDN, String clientId, String authTokenEndpoint, String clientKey, String logicAppADLtoSharepointURL, String adlBaseDir, String baseOutputFileName, StringBuilder folder, String query, DriverManagerDataSource dataSourceJDBC) throws IOException {
+    private void executeReport(String accountFQDN, String clientId, String authTokenEndpoint, String clientKey,
+                               String logicAppADLtoSharepointURL,
+                               String adlBaseDir, String baseOutputFileName,
+                               StringBuilder folder, String query,
+                               DriverManagerDataSource dataSourceJDBC, LinkedHashMap<String, String> mapHeadersAndFields) {
         log.info("Start execute report ");
         long start = System.currentTimeMillis();
         try {
@@ -787,7 +849,36 @@ public class ReportExecutionJob implements Job {
                     .createStatement(ResultSet.TYPE_SCROLL_SENSITIVE, ResultSet.CONCUR_UPDATABLE);
             Writer writer = new BufferedWriter(new OutputStreamWriter(zipOutputStream));
             CSVWriter csvWriter = new CSVWriter(writer, CSVWriter.DEFAULT_SEPARATOR, CSVWriter.NO_QUOTE_CHARACTER, CSVWriter.NO_ESCAPE_CHARACTER, CSVWriter.DEFAULT_LINE_END);
-            csvWriter.writeAll(statement.executeQuery(query), true);
+            String[] headers = new String[mapHeadersAndFields.keySet().size()];
+            Iterator<String> iteratorHeader = mapHeadersAndFields.keySet().iterator();
+            for (int i = 0; i < mapHeadersAndFields.keySet().size(); i++) {
+                headers[i] = mapHeadersAndFields.get(iteratorHeader.next());
+            }
+            csvWriter.writeNext(headers, true);
+            ResultSet resultSet = statement.executeQuery(query);
+            SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd");
+            while (resultSet.next()) {
+                String[] values = new String[mapHeadersAndFields.keySet().size()];
+                Iterator<String> iterator = mapHeadersAndFields.keySet().iterator();
+                for (int i=0; i < mapHeadersAndFields.keySet().size(); i++) {
+                    String key = iterator.next();
+                    try {
+                        Object value = resultSet.getObject(key);
+                        if (value == null) {
+                             values[i] = "";
+                        } else if (value instanceof Date) {
+                             values[i] = sdf.format((Date) value);
+                        } else {
+                            values[i] = String.valueOf(value);
+                        }
+                    } catch (SQLException e) {
+                        e.printStackTrace();
+                    }
+                }
+                csvWriter.writeNext(values, true);
+            }
+            resultSet.close();
+            //csvWriter.writeAll(statement.executeQuery(query), true);
             csvWriter.close();
             writer.close();
             zipOutputStream.close();
@@ -803,22 +894,20 @@ public class ReportExecutionJob implements Job {
         log.info("Finish execute report: " + (System.currentTimeMillis() - start));
     }
 
-    private StringBuilder getSubfolder(String jasperreportOutBaseDir) {
+    private StringBuilder getSubfolder(String jasperreportOutBaseDir, Calendar calendar) {
         String initFolderValue = jobDetails.getContentRepositoryDestination().getFolderURI();
         if (!StringUtils.isEmpty(jasperreportOutBaseDir) && initFolderValue.startsWith(jasperreportOutBaseDir)) {
             initFolderValue = initFolderValue.replaceFirst(jasperreportOutBaseDir,"");
         }
         StringBuilder folder = new StringBuilder(initFolderValue);
 
-        Calendar calendar = Calendar.getInstance(TimeZone.getTimeZone(jobDetails.getOutputTimeZone()));
-        log.info("Report Time: " + calendar.getTime().toString());
-        if (folder.toString().contains(" FM ")) {
+        if (folder.toString().contains("_FM_")) {
             //Fiscal month
             folder.append("/")
                     .append(calendar.get(Calendar.YEAR))
                     .append("/")
                     .append(calendar.get(Calendar.MONTH) + 1);
-        } else if (folder.toString().contains("Month")) {
+        } else if (folder.toString().contains("Monthly")) {
             //Average month
             calendar.add(Calendar.MONTH, -1);
             folder.append("/")
@@ -871,6 +960,7 @@ public class ReportExecutionJob implements Job {
             try (CloseableHttpResponse response = httpClient.execute(httpGet)) {
                 if (response.getStatusLine().getStatusCode() == 200) {
                     log.info("Files copy to Sharepoint : OK");
+                    logginForMonitoring(subfolder, fileName);
                 } else {
                     log.info("Files copy to Sharepoint : Failed");
                     log.info(response.getStatusLine().getReasonPhrase());
@@ -880,6 +970,23 @@ public class ReportExecutionJob implements Job {
             handleException("error.generating.report", e);
         }
         log.info("Finish Copy from Azure Data Lake Gen 1 to Sharepoint");
+    }
+
+    private void logginForMonitoring(StringBuilder subfolder, String fileName) {
+        try {
+            log.info("Write monitoring info: folder - " + subfolder +", filename - " + fileName +".zip");
+            DriverManagerDataSource dataSourceJDBC = new DriverManagerDataSource();
+            dataSourceJDBC.setDriverClassName("net.sourceforge.jtds.jdbc.Driver");
+            dataSourceJDBC.setUsername("bi-user");
+            dataSourceJDBC.setPassword("1q@w3e4r5t6Y");
+            dataSourceJDBC.setUrl("jdbc:jtds:sqlserver://imc-dev-mwe1-globus-monitoring-azuresql.database.windows.net:1433/validate_reports");
+            Statement statement  = dataSourceJDBC.getConnection()
+                    .createStatement();
+            statement.execute("insert into GLOBUS_reports(NameReport, PathReport, \"Date\") values ('" + fileName + ".zip', '" + subfolder + "' , GETUTCDATE())");
+            dataSourceJDBC.getConnection().close();
+        } catch (Exception e) {
+            log.info("Error: " + e.getMessage());
+        }
     }
 
     protected ReportJobContext getReportJobContext(final String baseFilename, final boolean useRepository) {
