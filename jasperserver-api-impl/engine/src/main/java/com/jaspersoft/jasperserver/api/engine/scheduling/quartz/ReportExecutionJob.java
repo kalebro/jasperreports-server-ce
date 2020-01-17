@@ -130,6 +130,7 @@ import java.util.TimeZone;
 import java.util.Set;
 import java.util.Arrays;
 import java.util.WeakHashMap;
+import java.util.zip.Deflater;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -186,6 +187,13 @@ public class ReportExecutionJob implements Job {
     public static final String SCHEDULER_CONTEXT_KEY_ADL_BASE_DIR = "adlBaseDir";
     public static final String SCHEDULER_CONTEXT_KEY_JASPERREPORT_OUT_BASE_DIR = "jasperOutBaseDir";
     public static final String SCHEDULER_CONTEXT_KEY_LOGIC_APP_COPY_SHAREPOINT = "logicAppADLtoSharepoint";
+
+    public static final String SCHEDULER_CONTEXT_KEY_MONITORING_ACTIVE = "monitoringActive";
+    public static final String SCHEDULER_CONTEXT_KEY_MONITORING_DB_USER = "monitoringDBUser";
+    public static final String SCHEDULER_CONTEXT_KEY_MONITORING_DB_PASSWORD = "monitoringDBPassword";
+    public static final String SCHEDULER_CONTEXT_KEY_MONITORING_DB_HOST = "monitoringDBHost";
+    public static final String SCHEDULER_CONTEXT_KEY_MONITORING_DB_PORT = "monitoringDBPort";
+    public static final String SCHEDULER_CONTEXT_KEY_MONITORING_DB_NAME = "monitoringDBName";
 
     public static final String JOB_DATA_KEY_DETAILS_ID = "jobDetailsID";
     public static final String JOB_DATA_KEY_USERNAME = "jobUser";
@@ -598,7 +606,7 @@ public class ReportExecutionJob implements Job {
                         DriverManagerDataSource dataSourceJDBC = initDataSource((JdbcReportDataSource) dataSource);
 
                         executeReport(accountFQDN, clientId, authTokenEndpoint, clientKey, logicAppADLtoSharepointURL,
-                                adlBaseDir, baseOutputFileName.toString(), folder, query, dataSourceJDBC, mapHeadersAndFields);
+                                adlBaseDir, baseOutputFileName.toString(), folder, query, dataSourceJDBC, mapHeadersAndFields, calendar.getTime());
 
                     }
                     log.info("===============================================================================");
@@ -750,13 +758,13 @@ public class ReportExecutionJob implements Job {
     private void getBaseFileNameCustom(StringBuilder folder, StringBuilder baseOutputFileName, Calendar calendar) {
         if (folder.toString().contains("_FM_")) {
             //Fiscal month
-            baseOutputFileName.append("_").append(calendar.get(Calendar.YEAR)).append("FM").append(calendar.get(Calendar.MONTH) + 1);
+            baseOutputFileName.append("_").append(calendar.get(Calendar.YEAR)).append("FM").append(addLeadingZero(calendar.get(Calendar.MONTH) + 1));
         } else if (folder.toString().contains("Monthly")) {
             //Average month
             //baseOutputFileName.append("_").append(calendar.get(Calendar.YEAR)).append("Monthly").append(calendar.get(Calendar.MONTH) + 1);
         } else if (folder.toString().contains("Weekly")) {
             //weekly report
-            baseOutputFileName.append("_").append(calendar.get(Calendar.YEAR)).append("W").append(calendar.get(Calendar.WEEK_OF_YEAR));
+            baseOutputFileName.append("_").append(calendar.get(Calendar.YEAR)).append(addLeadingZero(calendar.get(Calendar.WEEK_OF_YEAR))).append("W");
         } else if (folder.toString().contains("Daily")) {
             //daily
             //baseOutputFileName.append("_").append(calendar.get(Calendar.YEAR)).append("Daily").append(calendar.get(Calendar.MONTH) + 1).append("-").append(calendar.get(Calendar.DAY_OF_MONTH));
@@ -766,9 +774,9 @@ public class ReportExecutionJob implements Job {
                 .append("_")
                 .append(calendar.get(Calendar.YEAR))
                 .append("-")
-                .append(calendar.get(Calendar.MONTH) + 1)
+                .append(addLeadingZero(calendar.get(Calendar.MONTH) + 1))
                 .append("-")
-                .append(calendar.get(Calendar.DAY_OF_MONTH));
+                .append(addLeadingZero(calendar.get(Calendar.DAY_OF_MONTH)));
         log.info("Formatting baseFilename: " + baseOutputFileName.toString());
     }
 
@@ -824,7 +832,9 @@ public class ReportExecutionJob implements Job {
                                String logicAppADLtoSharepointURL,
                                String adlBaseDir, String baseOutputFileName,
                                StringBuilder folder, String query,
-                               DriverManagerDataSource dataSourceJDBC, LinkedHashMap<String, String> mapHeadersAndFields) {
+                               DriverManagerDataSource dataSourceJDBC,
+                               LinkedHashMap<String, String> mapHeadersAndFields,
+                               Date dateReport) {
         log.info("Start execute report ");
         long start = System.currentTimeMillis();
         try {
@@ -841,6 +851,7 @@ public class ReportExecutionJob implements Job {
 
             OutputStream outputStream = client.createFile(adlBaseDir + "/"+ folder.toString() + "/" + baseOutputFileName +".zip", IfExists.OVERWRITE);
             ZipOutputStream zipOutputStream = new ZipOutputStream(outputStream);
+            zipOutputStream.setLevel(Deflater.BEST_COMPRESSION);
             ZipEntry zipEntry = new ZipEntry(baseOutputFileName + ".csv");
             zipOutputStream.putNextEntry(zipEntry);
 
@@ -848,7 +859,7 @@ public class ReportExecutionJob implements Job {
                     .getConnection()
                     .createStatement(ResultSet.TYPE_SCROLL_SENSITIVE, ResultSet.CONCUR_UPDATABLE);
             Writer writer = new BufferedWriter(new OutputStreamWriter(zipOutputStream));
-            CSVWriter csvWriter = new CSVWriter(writer, CSVWriter.DEFAULT_SEPARATOR, CSVWriter.NO_QUOTE_CHARACTER, CSVWriter.NO_ESCAPE_CHARACTER, CSVWriter.DEFAULT_LINE_END);
+            CSVWriter csvWriter = new CSVWriter(writer, ';', CSVWriter.DEFAULT_QUOTE_CHARACTER, CSVWriter.DEFAULT_ESCAPE_CHARACTER, CSVWriter.DEFAULT_LINE_END);
             String[] headers = new String[mapHeadersAndFields.keySet().size()];
             Iterator<String> iteratorHeader = mapHeadersAndFields.keySet().iterator();
             for (int i = 0; i < mapHeadersAndFields.keySet().size(); i++) {
@@ -884,7 +895,7 @@ public class ReportExecutionJob implements Job {
             zipOutputStream.close();
             outputStream.close();
 
-            copyFromADLtoSharePoint(logicAppADLtoSharepointURL, baseOutputFileName, folder);
+            copyFromADLtoSharePoint(logicAppADLtoSharepointURL, baseOutputFileName, folder, dateReport);
 
         } catch (SQLException ex) {
             handleException(getMessage("error.generating.report", null), ex);
@@ -901,39 +912,45 @@ public class ReportExecutionJob implements Job {
         }
         StringBuilder folder = new StringBuilder(initFolderValue);
 
-        if (folder.toString().contains("_FM_")) {
-            //Fiscal month
-            folder.append("/")
-                    .append(calendar.get(Calendar.YEAR))
-                    .append("/")
-                    .append(calendar.get(Calendar.MONTH) + 1);
-        } else if (folder.toString().contains("Monthly")) {
+        if (initFolderValue.contains("Monthly")) {
             //Average month
-            calendar.add(Calendar.MONTH, -1);
-            folder.append("/")
-                    .append(calendar.get(Calendar.YEAR))
-                    .append("/")
-                    .append(calendar.get(Calendar.MONTH) + 1);
-        } else if (folder.toString().contains("Weekly")) {
+            calendar.set(Calendar.MONTH, 1);
+            calendar.add(Calendar.DAY_OF_YEAR, -1);
+        } else if (initFolderValue.contains("Weekly")) {
             //weekly report
-            calendar.add(Calendar.WEEK_OF_YEAR, -1);
-            folder.append("/")
-                    .append(calendar.get(Calendar.YEAR))
-                    .append("/")
-                    .append(calendar.get(Calendar.MONTH) + 1).append("/").append(calendar.get(Calendar.WEEK_OF_YEAR));
-        } else if (folder.toString().contains("Daily")) {
+            calendar.set(Calendar.DAY_OF_WEEK, 2);
+            calendar.add(Calendar.DAY_OF_YEAR, -1);
+        } else if (initFolderValue.contains("Daily")) {
             //daily
             calendar.add(Calendar.DAY_OF_YEAR, -1);
+        }
+        folder.append("/")
+                .append("YEAR-")
+                .append(calendar.get(Calendar.YEAR))
+                .append("/")
+                .append("MONTH-")
+                .append(addLeadingZero(calendar.get(Calendar.MONTH) + 1));
+
+        if (initFolderValue.contains("Weekly")) {
+            //weekly report
             folder.append("/")
-                    .append(calendar.get(Calendar.YEAR))
-                    .append("/")
-                    .append(calendar.get(Calendar.MONTH) + 1).append("/").append(calendar.get(Calendar.DAY_OF_MONTH));
+                    .append("WEEK-")
+                    .append(addLeadingZero(calendar.get(Calendar.WEEK_OF_YEAR)));
+        } else if (initFolderValue.contains("Daily")) {
+            //daily
+            folder.append("/")
+                    .append("DAY-")
+                    .append(addLeadingZero(calendar.get(Calendar.DAY_OF_MONTH)));
 
         }
         return folder;
     }
 
-    private void copyFromADLtoSharePoint(String logicAppADLtoSharepointURL, String fileName, StringBuilder subfolder) {
+    private String addLeadingZero(int value) {
+        return value < 10 ? "0" + value : String.valueOf(value);
+    }
+
+    private void copyFromADLtoSharePoint(String logicAppADLtoSharepointURL, String fileName, StringBuilder subfolder, Date dateReport) {
         if (StringUtils.isEmpty(logicAppADLtoSharepointURL)) {
             log.info("Logic app url is empty");
             return;
@@ -960,7 +977,7 @@ public class ReportExecutionJob implements Job {
             try (CloseableHttpResponse response = httpClient.execute(httpGet)) {
                 if (response.getStatusLine().getStatusCode() == 200) {
                     log.info("Files copy to Sharepoint : OK");
-                    logginForMonitoring(subfolder, fileName);
+                    loggingForMonitoring(subfolder, fileName, dateReport);
                 } else {
                     log.info("Files copy to Sharepoint : Failed");
                     log.info(response.getStatusLine().getReasonPhrase());
@@ -972,17 +989,27 @@ public class ReportExecutionJob implements Job {
         log.info("Finish Copy from Azure Data Lake Gen 1 to Sharepoint");
     }
 
-    private void logginForMonitoring(StringBuilder subfolder, String fileName) {
+    private void loggingForMonitoring(StringBuilder subfolder, String fileName, Date dateReport) {
+        if (!getMonitoringActive()){
+            return;
+        }
         try {
             log.info("Write monitoring info: folder - " + subfolder +", filename - " + fileName +".zip");
+            String dateReportStr = new SimpleDateFormat("yyyy-MM-dd").format(dateReport);
             DriverManagerDataSource dataSourceJDBC = new DriverManagerDataSource();
             dataSourceJDBC.setDriverClassName("net.sourceforge.jtds.jdbc.Driver");
-            dataSourceJDBC.setUsername("bi-user");
-            dataSourceJDBC.setPassword("1q@w3e4r5t6Y");
-            dataSourceJDBC.setUrl("jdbc:jtds:sqlserver://imc-dev-mwe1-globus-monitoring-azuresql.database.windows.net:1433/validate_reports");
+            dataSourceJDBC.setUsername(getMonitoringDbUser());//
+            dataSourceJDBC.setPassword(getMonitoringDbPassword());
+            StringBuilder dbUrl = new StringBuilder("jdbc:jtds:sqlserver://");
+            dbUrl.append(getMonitoringDbHost())
+                    .append(":")
+                    .append(getMonitoringDbPort())
+                    .append("/")
+                    .append(getMonitoringDbName());
+            dataSourceJDBC.setUrl(dbUrl.toString());
             Statement statement  = dataSourceJDBC.getConnection()
                     .createStatement();
-            statement.execute("insert into GLOBUS_reports(NameReport, PathReport, \"Date\") values ('" + fileName + ".zip', '" + subfolder + "' , GETUTCDATE())");
+            statement.execute("insert into GLOBUS_reports(NameReport, PathReport, \"DateGenerate\", \"DateReport\") values ('" + fileName + ".zip', '" + subfolder + "' , GETUTCDATE(),'" + dateReportStr + "')");
             dataSourceJDBC.getConnection().close();
         } catch (Exception e) {
             log.info("Error: " + e.getMessage());
@@ -1652,6 +1679,38 @@ public class ReportExecutionJob implements Job {
 
     protected String getJasperreportOutBaseDir() {
         String value = (String) schedulerContext.get(SCHEDULER_CONTEXT_KEY_JASPERREPORT_OUT_BASE_DIR);
+        return  value;
+    }
+
+    protected boolean getMonitoringActive() {
+        String value = (String) schedulerContext.get(SCHEDULER_CONTEXT_KEY_MONITORING_ACTIVE);
+        log.info("monitoring active = " + value);
+        if (value == null) return false;
+        return value.equalsIgnoreCase("true");
+    }
+
+    protected String getMonitoringDbUser() {
+        String value = (String) schedulerContext.get(SCHEDULER_CONTEXT_KEY_MONITORING_DB_USER);
+        return  value;
+    }
+
+    protected String getMonitoringDbPassword() {
+        String value = (String) schedulerContext.get(SCHEDULER_CONTEXT_KEY_MONITORING_DB_PASSWORD);
+        return  value;
+    }
+
+    protected String getMonitoringDbHost() {
+        String value = (String) schedulerContext.get(SCHEDULER_CONTEXT_KEY_MONITORING_DB_HOST);
+        return  value;
+    }
+
+    protected String getMonitoringDbPort() {
+        String value = (String) schedulerContext.get(SCHEDULER_CONTEXT_KEY_MONITORING_DB_PORT);
+        return  value;
+    }
+
+    protected String getMonitoringDbName() {
+        String value = (String) schedulerContext.get(SCHEDULER_CONTEXT_KEY_MONITORING_DB_NAME);
         return  value;
     }
 

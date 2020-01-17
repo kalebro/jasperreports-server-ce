@@ -391,6 +391,7 @@ public class ReportJobCalendarTrigger extends ReportJobTrigger implements Serial
 		if (calendarTrigger.isMonthDaysModified()) setMonthDays(calendarTrigger.getMonthDays());
 		if (calendarTrigger.isMonthsModified()) setMonths(calendarTrigger.getMonths());
 		if (calendarTrigger.isMisfireInstructionModified()) setMisfireInstruction(calendarTrigger.getMisfireInstruction());
+		if (calendarTrigger.isCalendarNameModified()) setCalendarName(calendarTrigger.getCalendarName());
 	}
 
 	@Override

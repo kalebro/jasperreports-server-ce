@@ -93,6 +93,9 @@
 		<field name="endDate" type="date">
 			<bind-xml name="endDate" node="element"/>
 		</field>
+		<field name="calendarName" type="string">
+			<bind-xml name="calendarName" node="element"/>
+		</field>
         <field name="misfireInstruction" type="integer">
 			<bind-xml name="misfireInstruction" node="element"/>
 		</field>

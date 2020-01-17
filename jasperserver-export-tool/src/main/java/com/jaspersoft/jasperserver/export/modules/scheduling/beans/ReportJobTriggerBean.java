@@ -37,6 +37,7 @@ public abstract class ReportJobTriggerBean {
 	private byte startType;
 	private Date startDate;
 	private Date endDate;
+	private String calendarName;
     private int misfireInstruction =  ReportJobTrigger.JS_MISFIRE_INSTRUCTION_NOT_SET;
 	
 	public void copyFrom(ReportJobTrigger trigger) {
@@ -46,6 +47,7 @@ public abstract class ReportJobTriggerBean {
 		setStartType(trigger.getStartType());
 		setStartDate(trigger.getStartDate());
 		setEndDate(trigger.getEndDate());
+		setCalendarName(trigger.getCalendarName());
         setMisfireInstruction(trigger.getMisfireInstruction());
 	}
 	
@@ -54,6 +56,7 @@ public abstract class ReportJobTriggerBean {
 		trigger.setStartType(getStartType());
 		trigger.setStartDate(getStartDate());
 		trigger.setEndDate(getEndDate());
+		trigger.setCalendarName(getCalendarName());
         trigger.setMisfireInstruction(getMisfireInstruction());
 	}
 	
@@ -114,5 +117,13 @@ public abstract class ReportJobTriggerBean {
     public void setMisfireInstruction(int misfireInstruction) {
         this.misfireInstruction = misfireInstruction;
     }
+
+	public String getCalendarName() {
+		return calendarName;
+	}
+
+	public void setCalendarName(String calendarName) {
+		this.calendarName = calendarName;
+	}
 
 }
